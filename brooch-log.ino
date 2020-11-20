@@ -19,7 +19,18 @@
 #include <avr/power.h>      // to go to sleep
 #include <avr/sleep.h>      // to go to sleep
 
-#define DEBUG true          // for debugging only - set false for deployment. 
+/* ----------- SD CARD ----------- */
+#include "SdFat.h"          // alternative (and faster?) lib for SD
+byte SDcard_present;            // sleep and restart? to get the SD card running.
+const uint8_t chipSelect = 10;  // chip select for SD card is 10 on the tinyduino
+SdFat sd;                       // the file to write the logs to
+SdFile file;                    // the file to write the logs to
+#define FILE_BASE_NAME "Brooch" // Log file base name.  Must be six characters or less.
+#define error(msg) sd.errorHalt(F(msg)) // Error messages stored in flash. (not sure how it's usefull)
+
+
+
+#define DEBUG false          // for debugging only - set false for deployment. 
 
 int INT_PIN = 3;             // INTerrupt pin from the RTC. On Arduino Uno, this should be mapped to digital pin 2 or pin 3, which support external interrupts
 int int_number = 1;          // On Arduino Uno, INT0 corresponds to pin 2, and INT1 to pin 3
@@ -43,7 +54,6 @@ DS1339 RTC = DS1339(INT_PIN, int_number);
 //int_number enables a software pullup on RTC Interrupt pin
 
 
-
 void setup() {
 
   //INTERRUPTS
@@ -59,11 +69,47 @@ void setup() {
   if (DEBUG) Serial.println ("Welcome to debugging logger.");
   if (DEBUG) Serial.flush(); 
 
+  if (DEBUG) Serial.println("Initializing SD card");delay(10);
+
+  /* ----------- SD Card ----------- */
+  const uint8_t BASE_NAME_SIZE = sizeof(FILE_BASE_NAME) - 1;
+  char fileName[13] = FILE_BASE_NAME "00.csv";                // setting name convention
+  if (!sd.begin(chipSelect, SD_SCK_MHZ(50))) {                // check if SD card responds
+    sd.initErrorHalt();
+    if (DEBUG) Serial.println("too high SD clock speed"); delay(10);
+  }
+
+  if (BASE_NAME_SIZE > 6) {               // Find an unused file name.
+    error("FILE_BASE_NAME too long");
+  }
+  while (sd.exists(fileName)) {
+    if (fileName[BASE_NAME_SIZE + 1] != '9') {
+      fileName[BASE_NAME_SIZE + 1]++;
+    } else if (fileName[BASE_NAME_SIZE] != '9') {
+      fileName[BASE_NAME_SIZE + 1] = '0';
+      fileName[BASE_NAME_SIZE]++;
+    } else {
+      error("Can't create file name");
+    }
+  }
+  if (!file.open(fileName, O_WRONLY | O_CREAT | O_EXCL)) {
+    error("file.open");
+    if (DEBUG) Serial.println("Cannot open SD Card"); delay(10);
+  } else {
+    if (DEBUG) Serial.println("SD card succesfully connected");delay(10);
+  }
+
+  file.println(F("on (1) / off (2);unixtimestamp;timestamp"));     // write the .csv header
+
   RTC.start(); // ensure RTC oscillator is running, if not already
 
+  //      upload the following line uncommented to reset the RTC timer.
+  //      upload immediately after WITH THIS LINE COMMENTED to prevent this
+  //      being done everytime the board boots!
+  
   RTC.readTime();
   if (DEBUG) Serial.print("The time read back from RTC is : ");
-  if (DEBUG) printTime();
+  if (DEBUG) Serial.print(printableTime());
   if (DEBUG) Serial.println();
 
   RTC.enable_interrupt();
@@ -75,7 +121,7 @@ void loop() {
 
   RTC.snooze(standardSnoozeTime);
 
-  if (DEBUG) Serial.flush(); RTC.readTime(); Serial.print("Woke up at "); printTime(); Serial.println();
+  if (DEBUG) Serial.flush(); RTC.readTime(); Serial.print("Woke up at "); Serial.print(printableTime()); Serial.println();
 
   buttonState = digitalRead(buttonPin);
   if (buttonState != previousButtonState) {   //  If true, the button state changed!
@@ -89,8 +135,12 @@ void loop() {
     int tempState = digitalRead(buttonPin);
 
     if (buttonState == tempState) {   // this means the change is persistent after a short snooze
-      if (DEBUG) Serial.flush(); RTC.readTime(); Serial.print("Persistent Change at "); printTime(); Serial.print(" with Button now at "); Serial.print(buttonState); Serial.println();
-      // store to SD card here!
+      String nowString = printableTime();
+      
+      if (DEBUG) Serial.flush(); RTC.readTime(); Serial.print("Persistent Change at "); Serial.print(nowString); Serial.print(" with Button now at "); Serial.print(buttonState); Serial.println();delay(10);
+      
+      logBrooch(nowString, tempState); // storing to SD card
+      if (DEBUG) Serial.println("Stored occurance on SD card"); delay(10);
     }
 
     buttonState = tempState;   // whether or not the change is persistent, we can update the values.
@@ -99,21 +149,34 @@ void loop() {
 
 }
 
-
-
-
-void printTime() {
+String printableTime() {
   // Print a formatted string of the current date and time.
 
-  Serial.print(int(RTC.getMonths()));
-  Serial.print("/");
-  Serial.print(int(RTC.getDays()));
-  Serial.print("/");
-  Serial.print(RTC.getYears());
-  Serial.print("  ");
-  Serial.print(int(RTC.getHours()));
-  Serial.print(":");
-  Serial.print(int(RTC.getMinutes()));
-  Serial.print(":");
-  Serial.print(int(RTC.getSeconds()));
+  String timestring = String(RTC.getMonths());
+  timestring += F("/");
+  timestring += String(RTC.getDays());
+  timestring += F("/");
+  timestring += String(RTC.getYears());
+  timestring += F("  ");
+  timestring += String(RTC.getHours());
+  timestring += F(":");
+  timestring += String(RTC.getMinutes());
+  timestring += F(":");
+  timestring += String(RTC.getSeconds());
+
+  return timestring;
+}
+
+void logBrooch(String nowString, int tempState) {
+  
+  file.print(String(tempState));
+  file.print(F(";"));
+  file.print(String(RTC.date_to_epoch_seconds()));
+  file.print(F(";"));
+  file.print(nowString);
+  file.println();
+
+  if (!file.sync() || file.getWriteError()) {     // Force data to SD and update the directory entry to avoid data loss.
+    error("write error");
+  }
 }
